@@ -4,11 +4,10 @@ from seleniumwire import webdriver
 import threading
 import requests
 import os
+import time
 
 # ---------------- Proxy + Browser Management ---------------- #
 browsers = []
-grid_positions = {}
-MAX_COLS = 10
 proxy_index = 0
 lock = threading.Lock()
 proxy_file_path = None
@@ -20,7 +19,6 @@ def log_message(msg):
     log_box.config(state="disabled")
 
 def load_proxies():
-    """Read proxy lines from selected file."""
     global proxy_file_path
     if not proxy_file_path or not os.path.exists(proxy_file_path):
         log_message("⚠️ Please select a valid proxy file first.")
@@ -29,7 +27,6 @@ def load_proxies():
         return [line.strip() for line in f if line.strip()]
 
 def test_proxy(proxy_line):
-    """Quickly check if a proxy works before using it."""
     try:
         username, password_host = proxy_line.split(":", 1)
         password, host_port = password_host.split("@", 1)
@@ -89,26 +86,18 @@ def close_all_browsers():
         except:
             pass
         browsers.remove(b)
+    refresh_squares()
     log_message("🛑 All browser instances closed.")
 
-
-# ---------------- Grid Management ---------------- #
-def get_next_grid_position():
-    for i in range(1000):
-        row, col = divmod(i, MAX_COLS)
-        if (row, col) not in grid_positions:
-            return row, col
-    return 0, 0
-
-def reserve_grid_position(row, col, square):
-    grid_positions[(row, col)] = square
-
-def release_grid_position(square):
-    for pos, sq in list(grid_positions.items()):
-        if sq == square:
-            del grid_positions[pos]
-            break
-
+# ---------------- GUI Helpers ---------------- #
+def refresh_squares():
+    """Reposition squares from left to right, top to bottom."""
+    for widget in grid_frame.winfo_children():
+        widget.grid_forget()
+    MAX_COLS = 10
+    for idx, b in enumerate(browsers):
+        row, col = divmod(idx, MAX_COLS)
+        b['square'].grid(row=row, column=col, padx=4, pady=4)
 
 # ---------------- GUI Logic ---------------- #
 def start_launch():
@@ -144,11 +133,8 @@ def start_launch():
         if driver is None:
             return
 
-        row, col = get_next_grid_position()
         square = tk.Button(grid_frame, bg="green", width=4, height=2)
-        square.grid(row=row, column=col, padx=4, pady=4)
-        reserve_grid_position(row, col, square)
-
+        square.grid_forget()  # will be positioned by refresh
         browsers.append({'driver': driver, 'square': square})
 
         def on_click():
@@ -156,16 +142,15 @@ def start_launch():
                 driver.quit()
             except:
                 pass
-            square.destroy()
-            release_grid_position(square)
             browsers[:] = [b for b in browsers if b['square'] != square]
+            refresh_squares()
             log_message("🟡 Browser closed.")
 
         square.configure(command=on_click)
+        refresh_squares()
 
     for _ in range(num_instances):
         threading.Thread(target=create_instance, daemon=True).start()
-
 
 # ---------------- File Selector ---------------- #
 def select_proxy_file():
@@ -179,12 +164,34 @@ def select_proxy_file():
         proxy_label.config(text=os.path.basename(file_path))
         log_message(f"📂 Loaded proxy file: {file_path}")
 
+# ---------------- Browser Monitor ---------------- #
+def monitor_browsers():
+    while True:
+        to_remove = []
+        for b in browsers:
+            try:
+                _ = b['driver'].current_url  # simple check if driver alive
+            except:
+                to_remove.append(b)
+        for b in to_remove:
+            try:
+                b['driver'].quit()
+            except:
+                pass
+            if b in browsers:
+                b['square'].destroy()
+                browsers.remove(b)
+                refresh_squares()
+                log_message("🟡 Browser closed externally.")
+        time.sleep(1)
+
+threading.Thread(target=monitor_browsers, daemon=True).start()
 
 # ---------------- Main GUI ---------------- #
 root = tk.Tk()
 root.title("Socks5 Proxy Launcher")
 root.geometry("540x520")
-root.resizable(False, False)
+root.minsize(540, 520)
 root.protocol("WM_DELETE_WINDOW", lambda: (close_all_browsers(), root.destroy()))
 
 # --- Top Controls --- #
@@ -212,7 +219,7 @@ proxy_label = tk.Label(controls, text="(none selected)", fg="gray")
 proxy_label.grid(row=4, column=1, sticky="w", padx=5)
 
 launch_btn = ttk.Button(controls, text="Launch Browsers", command=start_launch)
-launch_btn.grid(row=5, column=1, sticky="w", pady=5)
+launch_btn.grid(row=5, column=0, columnspan=2, sticky="ew", pady=10)
 
 # --- Grid Area --- #
 grid_frame = ttk.LabelFrame(root, text="Active Browsers", padding=10)
@@ -220,6 +227,6 @@ grid_frame.pack(fill="both", expand=True, padx=10, pady=5)
 
 # --- Log Window --- #
 log_box = scrolledtext.ScrolledText(root, width=60, height=8, state="disabled", wrap="word")
-log_box.pack(fill="both", padx=10, pady=10)
+log_box.pack(fill="both", padx=10, pady=10, expand=True)
 
 root.mainloop()
