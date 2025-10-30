@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, filedialog, scrolledtext
+from tkinter import ttk, filedialog, scrolledtext, messagebox
 import threading
 import time
 from seleniumwire import webdriver
@@ -8,7 +8,7 @@ from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
 
 # ---------------- Global Variables ---------------- #
-browsers = []
+browsers = []            # list of entries: {'driver': ..., 'square': ..., 'loading': bool}
 proxies = []
 proxy_index = 0
 lock = threading.Lock()
@@ -24,13 +24,17 @@ def log_message(msg):
 
 # ---------------- Proxy Handling ---------------- #
 def load_proxies():
-    global proxies
+    global proxies, proxy_file_path, proxy_index
     if not proxy_file_path:
         log_message("⚠️ Please select a proxy file.")
         return
-    with open(proxy_file_path, "r") as f:
-        proxies = [line.strip() for line in f if line.strip()]
-    log_message(f"📂 Loaded {len(proxies)} proxies from file.")
+    try:
+        with open(proxy_file_path, "r", encoding="utf-8") as f:
+            proxies = [line.strip() for line in f if line.strip()]
+        proxy_index = 0
+        log_message(f"📂 Loaded {len(proxies)} proxies from file.")
+    except Exception as e:
+        messagebox.showerror("Error", f"Could not load proxies: {e}")
 
 def get_next_proxy():
     global proxy_index
@@ -42,19 +46,19 @@ def get_next_proxy():
         return proxy
 
 # ---------------- Browser Management ---------------- #
-def create_instance(url):
+def create_instance(url, low_resource, headless):
     proxy = get_next_proxy()
     if not proxy:
         log_message("⚠️ No proxies loaded.")
         return
 
-    # Yellow square immediately
+    # create yellow square immediately (launching)
     square = tk.Button(grid_frame, bg="yellow", width=4, height=2)
     entry = {"driver": None, "square": square, "loading": True}
     browsers.append(entry)
     refresh_squares()
 
-    # Allow canceling yellow square
+    # allow cancelling while yellow
     def cancel_launch():
         if entry in browsers:
             browsers.remove(entry)
@@ -67,9 +71,9 @@ def create_instance(url):
 
     square.configure(command=cancel_launch)
 
-    # Launch browser in background thread
     def launch_browser():
         try:
+            # SeleniumWire options (still used for proxy handling)
             seleniumwire_options = {
                 "proxy": {
                     "http": f"socks5://{proxy}",
@@ -77,15 +81,40 @@ def create_instance(url):
                     "no_proxy": "localhost,127.0.0.1"
                 },
                 "request_storage": "memory",
-                "request_storage_max_size": 50
+                "request_storage_max_size": 10  # modest buffer to save memory
             }
 
             chrome_options = Options()
-            if headless_var.get():
+            # Low resource flags
+            if low_resource:
+                chrome_options.add_argument("--disable-dev-shm-usage")
+                chrome_options.add_argument("--disable-background-timer-throttling")
+                chrome_options.add_argument("--disable-backgrounding-occluded-windows")
+                chrome_options.add_argument("--disable-renderer-backgrounding")
+                chrome_options.add_argument("--disable-extensions")
+                chrome_options.add_argument("--disable-sync")
+                chrome_options.add_argument("--no-sandbox")
+                chrome_options.add_argument("--disable-notifications")
+                chrome_options.add_argument("--disable-default-apps")
+                chrome_options.add_argument("--disable-popup-blocking")
+                chrome_options.add_argument("--mute-audio")
+                chrome_options.add_argument("--incognito")
+                # Disable images (big memory saver)
+                chrome_options.add_argument("--blink-settings=imagesEnabled=false")
+            else:
+                chrome_options.add_argument("--no-sandbox")
+
+            # Headless default true option applied
+            if headless:
+                # headless new is recommended in modern Chrome
                 chrome_options.add_argument("--headless=new")
+                chrome_options.add_argument("--disable-gpu")
+
+            # General safe flags
             chrome_options.add_argument("--disable-gpu")
             chrome_options.add_argument("--log-level=3")
 
+            # create driver
             driver = webdriver.Chrome(
                 service=Service(ChromeDriverManager().install()),
                 options=chrome_options,
@@ -95,24 +124,41 @@ def create_instance(url):
             entry["driver"] = driver
             entry["loading"] = False
 
-            # Change square to green and update click handler
-            square.configure(bg="green")
-
-            def close_browser():
-                threading.Thread(target=_close_browser_thread, args=(entry,), daemon=True).start()
-
-            square.configure(command=close_browser)
-
+            # navigate first so we can confirm launch
             driver.get(url if url.strip() else "about:blank")
             log_message(f"🟢 Browser launched with proxy {proxy}")
 
-            # Monitor driver
+            # turn square green and set close handler on main thread
+            def set_green_and_handler():
+                try:
+                    square.configure(bg="green")
+                except:
+                    pass
+
+                def on_click_close():
+                    # immediate visual feedback: red
+                    try:
+                        square.configure(bg="red")
+                    except:
+                        pass
+                    # close in background so UI doesn't block
+                    threading.Thread(target=_close_browser_thread, args=(entry,), daemon=True).start()
+
+                try:
+                    square.configure(command=on_click_close)
+                except:
+                    pass
+
+            square.after(0, set_green_and_handler)
+
+            # monitor the driver; if it dies externally, remove square
             while running:
                 try:
-                    _ = driver.title
+                    _ = driver.title  # simple liveness check
                     time.sleep(1)
                 except:
                     break
+
         except Exception as e:
             log_message(f"❌ Failed to launch with proxy {proxy}: {e}")
             with lock:
@@ -144,14 +190,18 @@ def _close_browser_thread(entry):
     log_message("🟥 Browser closed.")
 
 def refresh_squares():
+    # reflow squares left-to-right, top-to-bottom
     for i, b in enumerate(browsers):
-        b["square"].grid(row=i // 10, column=i % 10, padx=4, pady=4)
+        try:
+            b["square"].grid(row=i // 10, column=i % 10, padx=4, pady=4)
+        except:
+            pass
 
 def close_all_browsers():
     global running
     running = False
     log_message("🔻 Closing all browsers...")
-    for b in browsers[:]:
+    for b in list(browsers):
         _close_browser_thread(b)
     log_message("✅ All browsers closed.")
 
@@ -176,8 +226,11 @@ num_entry = tk.Entry(settings_frame, width=10)
 num_entry.grid(row=1, column=1, sticky="w", padx=5, pady=5)
 num_entry.insert(0, "1")
 
-headless_var = tk.BooleanVar()
+# Headless and Low Resource checkboxes (checked by default)
+headless_var = tk.BooleanVar(value=True)
+lowres_var = tk.BooleanVar(value=True)
 tk.Checkbutton(settings_frame, text="Headless mode", variable=headless_var).grid(row=2, column=1, sticky="w", padx=5, pady=5)
+tk.Checkbutton(settings_frame, text="Low Resource Mode", variable=lowres_var).grid(row=2, column=2, sticky="w", padx=5, pady=5)
 
 tk.Label(settings_frame, text="Proxy file:").grid(row=3, column=0, sticky="w", padx=5, pady=5)
 proxy_label = tk.Label(settings_frame, text="(none selected)", fg="gray")
@@ -205,9 +258,12 @@ def start_launch():
         log_message("⚠️ Invalid number of browsers.")
         return
 
+    lowres = bool(lowres_var.get())
+    headless = bool(headless_var.get())
+
     for _ in range(num_instances):
-        create_instance(url)
-        time.sleep(0.2)
+        create_instance(url, low_resource=lowres, headless=headless)
+        time.sleep(0.2)  # stagger launches slightly
 
 launch_btn = ttk.Button(settings_frame, text="Launch Browsers", command=lambda: threading.Thread(target=start_launch, daemon=True).start())
 launch_btn.grid(row=5, column=1, columnspan=2, sticky="w", pady=10)
