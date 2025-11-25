@@ -1,5 +1,5 @@
 # chatgpt-socks5-proxy-browser
-Launch Chrome with SOCKS5 proxy
+Launch Chrome (version 139) with SOCKS5 proxy
 
 All coded by chatgpt!!!
 
